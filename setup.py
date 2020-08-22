@@ -2,7 +2,7 @@
 
 import sys
 
-from social_fetcher import __version__
+from social_feed_fetcher import __version__
 
 try:
     from setuptools import setup, find_packages
