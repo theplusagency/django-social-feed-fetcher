@@ -1,17 +1,38 @@
 from django.core.cache import cache
 import requests
 
+from social_feed_fetcher.exceptions import SocialFeedFetcherException
 from social_feed_fetcher.signals import social_feed_fetch_failed
 
 
 class BaseSocialFeedFetcher:
+    # cache_timeout
+    # Cache duration in seconds
+    # Can be passed optionally as a parameter on initialization
+
+    # With Async Cache Update configured, cache_duration can be set
+    # to a high value (86400), so the posts stay available if the API
+    # fetch action fail.
+
+    # If you don't have Async Cache Update, then it's value will define
+    # how often the posts will be fetched.
+    cache_timeout = 3600
+
+    # fail_silently
+    # Don't raise any exceptions in case of failure
+    # If the action of fetching posts fails, and fail_silently
+    # is set to True, no exception will be raised.
     fail_silently = False
 
-    def __init__(self, fail_silently):
-        self.fail_silently = fail_silently
+    def __init__(self, **kwargs):
+        if 'cache_duration' in kwargs:
+            self.cache_duration = kwargs.get('cache_duration')
+
+        if 'fail_silently' in kwargs:
+            self.fail_silently = kwargs.get('fail_silently')
 
     def get_feed(self):
-        cached_feed = cache.get(self.get_cache_key())
+        cached_feed = cache.get(self.get_cache_key(), None)
 
         if cached_feed:
             return cached_feed
@@ -26,8 +47,12 @@ class BaseSocialFeedFetcher:
 
     def update_feed(self):
         try:
-            return self.fetch_feed()
+            feed = self.fetch_feed()
+            cache.set(self.get_cache_key(), feed, timeout=self.cache_timeout)
+
+            return feed
         except Exception as exception:
+            # Send custom social_feed_fetch_failed Django signal
             social_feed_fetch_failed.send(sender=self.__class__, exception=exception)
 
             if self.fail_silently:
@@ -36,13 +61,13 @@ class BaseSocialFeedFetcher:
             raise exception
 
 
-class InstagramSocialFeedFetcher(BaseSocialFeedFetcher):
+class InstagramFeedFetcher(BaseSocialFeedFetcher):
     access_token = None
     username = None
     posts_to_fetch = 9
 
     def __init__(self, access_token, username, fail_silently=False):
-        super().__init__(fail_silently)
+        super().__init__(fail_silently=fail_silently)
 
         self.access_token = access_token
         self.username = username
@@ -55,18 +80,15 @@ class InstagramSocialFeedFetcher(BaseSocialFeedFetcher):
         payload = {
             'fields': 'id,caption,media_type,media_url,permalink,thumbnail_url',
             'access_token': self.access_token,
-            'limit': '9'
+            'limit': '{}'.format(self.posts_to_fetch)
         }
 
         response = (requests.get('https://graph.instagram.com/me/media', params=payload)).json()
 
-        items = []
+        if not response or 'data' not in response.keys():
+            raise SocialFeedFetcherException('Error fetching Instagram latest media')
 
-        for media in response['data']:
-            items.append({
-                'image': media['thumbnail_url'] if media['media_type'] == 'VIDEO' else media['media_url'],
-                'link': media['permalink']
-            })
+        items = response['data']
 
         return items
 
